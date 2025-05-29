@@ -1,187 +1,162 @@
-local M = {}
+--[[
+--
+-- Health check for tmuxscope.nvim
+-- Checks that tmux, telescope, and plugin configuration are working correctly.
+--
+--]]
 
-local health = require("vim.health")
-
--- Helper function to check if a command exists
-local function command_exists(cmd)
-	local handle = io.popen("command -v " .. cmd .. " 2>/dev/null")
-	if not handle then
-		return false
-	end
-	local result = handle:read("*a")
-	handle:close()
-	return result and result ~= ""
-end
-
--- Helper function to get command version
-local function get_command_version(cmd, version_flag)
-	version_flag = version_flag or "--version"
-	local handle = io.popen(cmd .. " " .. version_flag .. " 2>/dev/null")
-	if not handle then
-		return nil
-	end
-	local result = handle:read("*a")
-	handle:close()
-	return result and result:match("[^\r\n]+") or nil
-end
-
--- Check Neovim version
-local function check_neovim()
-	local required_version = { 0, 7, 0 }
-	local current_version = vim.version()
-
-	if vim.version.cmp(current_version, required_version) >= 0 then
-		health.info(string.format("Neovim version: %s", vim.version.tostring(current_version)))
-		health.ok("Neovim version is compatible")
+local function check_neovim_version()
+	local verstr = string.format('%s.%s.%s', vim.version().major, vim.version().minor, vim.version().patch)
+	
+	if vim.version.cmp(vim.version(), { 0, 7, 0 }) >= 0 then
+		vim.health.ok(string.format("Neovim version is: '%s'", verstr))
 	else
-		health.error(
-			string.format(
-				"Neovim version %s is too old. Required: >= %s",
-				vim.version.tostring(current_version),
-				vim.version.tostring(required_version)
-			)
-		)
+		vim.health.error(string.format("Neovim out of date: '%s'. tmuxscope requires Neovim >= 0.7.0", verstr))
 	end
 end
 
--- Check telescope availability
+local function check_external_dependencies()
+	-- Check for tmux
+	if vim.fn.executable('tmux') == 1 then
+		local handle = io.popen('tmux -V 2>/dev/null')
+		if handle then
+			local version = handle:read('*a'):gsub('\n', '')
+			handle:close()
+			vim.health.ok(string.format("Found tmux: %s", version))
+		else
+			vim.health.ok("Found executable: 'tmux'")
+		end
+	else
+		vim.health.error("Could not find executable: 'tmux' - this is required for tmuxscope to work")
+		vim.health.info("Install tmux: https://github.com/tmux/tmux")
+	end
+
+	-- Check for other useful tools
+	for _, exe in ipairs { 'find', 'mkdir' } do
+		if vim.fn.executable(exe) == 1 then
+			vim.health.ok(string.format("Found executable: '%s'", exe))
+		else
+			vim.health.warn(string.format("Could not find executable: '%s'", exe))
+		end
+	end
+end
+
 local function check_telescope()
-	local telescope_ok, telescope = pcall(require, "telescope")
+	local telescope_ok, telescope = pcall(require, 'telescope')
 	if telescope_ok then
-		health.ok("telescope.nvim is available")
-
+		vim.health.ok("telescope.nvim is available")
+		
 		-- Check if tmuxscope extension is loaded
-		local extensions = telescope.extensions or {}
-		if extensions.tmuxscope then
-			health.ok("tmuxscope extension is loaded")
+		if telescope.extensions and telescope.extensions.tmuxscope then
+			vim.health.ok("tmuxscope extension is loaded")
 		else
-			health.warn("tmuxscope extension is not loaded. Run :Telescope load_extension tmuxscope")
+			vim.health.warn("tmuxscope extension is not loaded")
+			vim.health.info("Load the extension with: require('telescope').load_extension('tmuxscope')")
 		end
 	else
-		health.error("telescope.nvim is not installed or not available")
-		health.info("Install telescope.nvim: https://github.com/nvim-telescope/telescope.nvim")
+		vim.health.error("telescope.nvim is not available")
+		vim.health.info("Install telescope.nvim: https://github.com/nvim-telescope/telescope.nvim")
 	end
 end
 
--- Check tmux availability
-local function check_tmux()
-	if command_exists("tmux") then
-		local version = get_command_version("tmux", "-V")
-		if version then
-			health.info("tmux version: " .. version)
-			health.ok("tmux is available")
-
-			-- Test tmux functionality
-			local handle = io.popen("tmux list-sessions 2>/dev/null")
-			if handle then
-				handle:close()
-				health.ok("tmux list-sessions command works")
-			else
-				health.warn("tmux list-sessions command failed")
-			end
-		else
-			health.warn("tmux is available but version could not be determined")
-		end
+local function check_tmux_environment()
+	local tmux_env = os.getenv('TMUX')
+	if tmux_env then
+		vim.health.ok("Running inside tmux session")
+		vim.health.info("Session switching will work directly")
 	else
-		health.error("tmux is not installed or not in PATH")
-		health.info("Install tmux: https://github.com/tmux/tmux")
+		vim.health.info("Not running inside tmux")
+		vim.health.info("New sessions will be created detached, you'll need to attach manually")
 	end
 end
 
--- Check tmuxscope configuration
-local function check_configuration()
-	local tmuxscope_ok, tmuxscope = pcall(require, "telescope._extensions.tmuxscope")
-	if not tmuxscope_ok then
-		health.error("tmuxscope extension module could not be loaded")
-		return
-	end
-
-	-- Check if config exists and has valid search paths
-	if tmuxscope.config then
-		health.ok("tmuxscope configuration found")
-
+local function check_plugin_config()
+	local tmuxscope_ok, tmuxscope = pcall(require, 'telescope._extensions.tmuxscope')
+	if tmuxscope_ok and tmuxscope.config then
+		vim.health.ok("tmuxscope configuration found")
+		
+		-- Check search paths
 		if tmuxscope.config.search_paths and #tmuxscope.config.search_paths > 0 then
-			health.info(string.format("Configured search paths (%d):", #tmuxscope.config.search_paths))
-
 			local valid_paths = 0
+			vim.health.info(string.format("Configured search paths (%d):", #tmuxscope.config.search_paths))
+			
 			for _, path in ipairs(tmuxscope.config.search_paths) do
 				local expanded_path = vim.fn.expand(path)
 				if vim.fn.isdirectory(expanded_path) == 1 then
-					health.info(string.format("  ✓ %s → %s", path, expanded_path))
+					vim.health.info(string.format("  ✓ %s → %s", path, expanded_path))
 					valid_paths = valid_paths + 1
 				else
-					health.warn(string.format("  ✗ %s → %s (directory does not exist)", path, expanded_path))
+					vim.health.warn(string.format("  ✗ %s → %s (directory does not exist)", path, expanded_path))
 				end
 			end
-
+			
 			if valid_paths > 0 then
-				health.ok(string.format("%d/%d search paths are valid", valid_paths, #tmuxscope.config.search_paths))
+				vim.health.ok(string.format("%d/%d search paths are valid", valid_paths, #tmuxscope.config.search_paths))
 			else
-				health.error("No valid search paths found")
+				vim.health.error("No valid search paths found")
 			end
 		else
-			health.warn("No search paths configured")
+			vim.health.warn("No search paths configured")
 		end
-
+		
 		-- Check tmux command
 		if tmuxscope.config.tmux_command then
-			local cmd = tmuxscope.config.tmux_command
-			if command_exists(cmd) then
-				health.ok(string.format('Configured tmux command "%s" is available', cmd))
+			if vim.fn.executable(tmuxscope.config.tmux_command) == 1 then
+				vim.health.ok(string.format("Configured tmux command '%s' is available", tmuxscope.config.tmux_command))
 			else
-				health.error(string.format('Configured tmux command "%s" is not available', cmd))
+				vim.health.error(string.format("Configured tmux command '%s' is not available", tmuxscope.config.tmux_command))
+			end
+		end
+	else
+		vim.health.warn("tmuxscope configuration not found, using defaults")
+	end
+end
+
+local function check_tmux_functionality()
+	if vim.fn.executable('tmux') == 1 then
+		-- Test basic tmux functionality
+		local handle = io.popen('tmux list-sessions 2>/dev/null')
+		if handle then
+			local result = handle:read('*a')
+			handle:close()
+			vim.health.ok("tmux list-sessions command works")
+			
+			if result and result ~= "" then
+				local session_count = 0
+				for line in result:gmatch("[^\r\n]+") do
+					session_count = session_count + 1
+				end
+				vim.health.info(string.format("Found %d existing tmux session(s)", session_count))
+			else
+				vim.health.info("No existing tmux sessions found")
 			end
 		else
-			health.warn("No tmux command configured")
-		end
-	else
-		health.warn("tmuxscope configuration not found, using defaults")
-	end
-end
-
--- Check if we're in tmux environment
-local function check_tmux_environment()
-	local tmux_env = os.getenv("TMUX")
-	if tmux_env then
-		health.info("Running inside tmux session")
-		health.ok("Session switching will work directly")
-	else
-		health.info("Not running inside tmux")
-		health.info("New sessions will be created detached, you'll need to attach manually")
-	end
-end
-
--- Check common dependencies
-local function check_dependencies()
-	-- Check for common utilities used by the extension
-	local utilities = {
-		{ cmd = "find", desc = "Required for directory scanning" },
-		{ cmd = "mkdir", desc = "Required for directory creation" },
-	}
-
-	for _, util in ipairs(utilities) do
-		if command_exists(util.cmd) then
-			health.ok(string.format("%s is available", util.cmd))
-		else
-			health.error(string.format("%s is not available - %s", util.cmd, util.desc))
+			vim.health.warn("tmux list-sessions command failed")
 		end
 	end
 end
 
--- Main health check function
-function M.check()
-	health.start("tmuxscope.nvim health check")
+return {
+	check = function()
+		vim.health.start('tmuxscope.nvim')
 
-	check_neovim()
-	check_telescope()
-	check_tmux()
-	check_configuration()
-	check_tmux_environment()
-	check_dependencies()
+		vim.health.info([[tmuxscope.nvim - A telescope extension for tmux session management
 
-	health.start("Summary")
-	health.info("Run :help tmuxscope for documentation")
-	health.info("Report issues at: https://github.com/yourusername/tmuxscope.nvim/issues")
-end
+This health check verifies that tmux, telescope, and the plugin are configured correctly.]])
 
-return M
+		local uv = vim.uv or vim.loop
+		vim.health.info('System Information: ' .. vim.inspect(uv.os_uname()))
+
+		check_neovim_version()
+		check_external_dependencies()
+		check_telescope()
+		check_tmux_environment()
+		check_plugin_config()
+		check_tmux_functionality()
+
+		vim.health.start('Summary')
+		vim.health.info('Use :Telescope tmuxscope sessions to browse tmux sessions')
+		vim.health.info('Use :Telescope tmuxscope new to create new sessions')
+		vim.health.info('Report issues at: https://github.com/yourusername/tmuxscope.nvim/issues')
+	end,
+}
